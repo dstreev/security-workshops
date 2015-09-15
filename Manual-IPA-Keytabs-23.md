@@ -1,113 +1,11 @@
-####  Import HDP single node VM, install IPA and then secure it with KDC on IPA server  
+## IPA Kerberos Configuration with Ambari wizard
 
-- Goals: 
-  - Setup FreeIPA to enable FreeIPA as central store of posix data using SSSD
-  - Create end users and groups in its directory 
-  - Enable Kerberos for the HDP Cluster using FreeIPA server KDC to store Hadoop principals
-  
-- Pre-requisites: 
-  1. Ambari 2.1
-  2. Deploy HDP 2.3 using Ambari
-
-
-- Steps:
-  3. Install FreeIPA using Ambari
-  4. (optional) Create example users
-
-- Further reading on setting up kerberos on Hadoop
-  - [Steve L](https://github.com/steveloughran/kerberos_and_hadoop)
-  
------------------------
-
-## Pre-requisites if not done already
-
-
-0- Create /etc/hosts entry
-```
-#you may need to replace eth0 below
-host=`hostname -f`
-eth="eth0"
-ip=$(/sbin/ip -o -4 addr list eth0 | awk '{print $4}' | cut -d/ -f1)
-echo "${ip} $(hostname -f) $(hostname) sandbox.hortonworks.com" | sudo tee -a /etc/hosts
-```
-
-1- Install Ambari 2.1 
-
-  - For CentOS 7 you can use the below:
-```
-systemctl stop firewalld
-systemctl disable firewalld
-
-
-## el7 defaults to MariaDB so we need the community release of MySQL
-sudo rpm -Uvh http://dev.mysql.com/get/mysql-community-release-el7-5.noarch.rpm
-
-## use ambari-bootstrap to install Ambari
-sudo yum -y install git python-argparse
-git clone -b centos-7 https://github.com/seanorama/ambari-bootstrap
-cd ambari-bootstrap
-sudo install_ambari_server=true install_ambari-agent=true ./ambari-bootstrap.sh
-
-ambari-server restart
-```
-
-  - For CentOS6.x you can use the below:
-```
-## use ambari-bootstrap to install Ambari
-
-sudo yum -y install git python-argparse
-git clone https://github.com/seanorama/ambari-bootstrap
-cd ambari-bootstrap
-sudo install_ambari_server=true install_ambari-agent=true ./ambari-bootstrap.sh
-```
-
-2- Deploy HDP 2.3
-
-  - Deploy manually from http://YOURHOST:8080
-    - choosing to manually register the hosts since the Ambari Agent is already registered
-  - Or use a Blueprint
-```
-export ambari_services="AMBARI_METRICS KNOX YARN ZOOKEEPER TEZ PIG SLIDER MAPREDUCE2 HIVE HDFS HBASE"
-bash ./deploy/deploy-recommended-cluster.bash
-```
-
-3- Setup FreeIPA on a separate CentOS host by configuring and running the sample scripts. 
-```
-yum install -y git
-cd ~
-git clone https://github.com/abajwa-hw/security-workshops
-
-#configure/run script to install/start IPA server
-~/security-workshops/scripts/run_setupFreeIPA.sh
-
-# (Optional) configure/run script to import groups/users and their kerberos princials
-~/security-workshops/scripts/run_FreeIPA_importusers.sh
-```
-More details/video can be found [here](https://github.com/abajwa-hw/security-workshops/blob/master/Setup-LDAP-IPA.md)
-  
-4- Ensure IP and sandbox VMs are reachable from each other by:
-  - adding entry for ldap.hortonworks.com on sandbox VM
-  - adding entry for sandbox.hortonworks.com on IPA VM 
-```
-vi /etc/hosts
-```
-------------------
-
-## Check/Setup OS-LDAP integration 
-
-- Ensure the IPA client was setup correctly on HDP by checking that the LDAP users are recognized by the OS.
-```
-id paul      #or some other user contained in your LDAP
-groups paul   #or some other user contained in your LDAP
-```
-  - If you are not using the prebuilt VMs where this was already setup, you can install the client using the below (replace the values for your own setup). On multinode setup, this should be run on all nodes. If using this guide: When prompted enter: yes > yes > hortonworks
-```
-yum install ipa-client openldap-clients -y
-ipa-client-install --domain=hortonworks.com --server=ldap.hortonworks.com  --mkhomedir --ntp-server=north-america.pool.ntp.org -p admin@HORTONWORKS.COM -W
-```  
-  - Now re-try the id/groups command above and it should work.
-
--------------------
+- Goal
+    - Create and Setup IPA Keytabs for HDP
+    
+- Assumptions
+    - Ambari does NOT currently (2.1.x) support the automatic generation of keytabs against IPA
+    - IPA Server is already installed and IPA clients have been installed/configured on all HDP cluster nodes
 
 ## Enable kerberos using wizard
 
@@ -121,17 +19,12 @@ ipa-client-install --domain=hortonworks.com --server=ldap.hortonworks.com  --mkh
   - smoke user principal: ${cluster-env/smokeuser}@${realm}
   - HDFS user principal: ${hadoop-env/hdfs_user}@${realm}
   - HBase user principal: ${hbase-env/hbase_user}@${realm}
+  - Spark user principal: ...
 
 ![Image](../master/screenshots/2.3-ipa-kerb-3.png?raw=true)
 
 - On next page download csv file but **DO NOT** click Next yet
 ![Image](../master/screenshots/2.3-ipa-kerb-4.png?raw=true)
-
-
--  Paste contents to a file *on both IPA host and on ALL HDP nodes*, making sure to remove empty lines at the end.
-```
-vi kerberos.csv
-```
 
   - If you are deploying storm, the storm user maybe missing from the storm USER row. If you see something like the below:
 ```
@@ -142,6 +35,10 @@ replace the `,,` with `,storm,`
 storm@HORTONWORKS.COM,USER,storm,/etc
 ```  
 
+-  Copy above csv to *ALL* hosts, making sure to remove empty lines at the end.
+```
+vi kerberos.csv
+```
 
 - **On the IPA node** Create principals using csv file
 
@@ -173,7 +70,7 @@ sudo bash ./gen_keytabs_user.sh
 ```
 
 ```
-# tar up the contents and distribute to ALL HDP nodes
+# tar up the contents of the headless keytabs (use Ambari's Resources for distribution)
 tar -cvfz /var/lib/ambari-server/resources/headless.keytabs.tgz -C /etc/security keytabs
 ```
 
@@ -207,6 +104,8 @@ sudo -u hdfs kinit -kt /etc/security/keytabs/nn.service.keytab nn/$(hostname -f)
 sudo -u ambari-qa kinit -kt /etc/security/keytabs/smokeuser.headless.keytab ambari-qa@HORTONWORKS.COM
 sudo -u hdfs kinit -kt /etc/security/keytabs/hdfs.headless.keytab hdfs@HORTONWORKS.COM
 ```
+
+# Remove the headless.keytabs.tgz file from /var/lib/ambari-server/resources on the Ambari-Server.
 
 - Press next on security wizard and proceed to stop services
 ![Image](../master/screenshots/2.3-ipa-kerb-stop.png?raw=true)
