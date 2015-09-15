@@ -105,7 +105,7 @@ sudo -u ambari-qa kinit -kt /etc/security/keytabs/smokeuser.headless.keytab amba
 sudo -u hdfs kinit -kt /etc/security/keytabs/hdfs.headless.keytab hdfs@HORTONWORKS.COM
 ```
 
-# Remove the headless.keytabs.tgz file from /var/lib/ambari-server/resources on the Ambari-Server.
+### Remove the headless.keytabs.tgz file from /var/lib/ambari-server/resources on the Ambari-Server.
 
 - Press next on security wizard and proceed to stop services
 ![Image](../master/screenshots/2.3-ipa-kerb-stop.png?raw=true)
