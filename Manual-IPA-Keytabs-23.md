@@ -7,6 +7,8 @@
     - Ambari does NOT currently (2.1.x) support the automatic generation of keytabs against IPA
     - IPA Server is already installed and IPA clients have been installed/configured on all HDP cluster nodes
 
+    - If you are using Accumulo, you need to create the user 'tracer' in IPA. A keytab for this user will be requested for Accumulo Tracer.
+    
 ## Enable kerberos using wizard
 
 - In Ambari, start security wizard by clicking Admin -> Kerberos and click Enable Kerberos. Then select "Manage Kerberos principals and key tabs manually" option
@@ -19,7 +21,9 @@
   - smoke user principal: ${cluster-env/smokeuser}@${realm}
   - HDFS user principal: ${hadoop-env/hdfs_user}@${realm}
   - HBase user principal: ${hbase-env/hbase_user}@${realm}
-  - Spark user principal: ...
+  - Spark user principal: ${spark-env/spark_user}@${realm}
+  - Accumulo user principal: ${accumulo-env/accumulo_user}@${realm}
+  - Accumulo Tracer User: tracer@${realm}
 
 ![Image](../master/screenshots/2.3-ipa-kerb-3.png?raw=true)
 
@@ -35,7 +39,7 @@ replace the `,,` with `,storm,`
 storm@HORTONWORKS.COM,USER,storm,/etc
 ```  
 
--  Copy above csv to *ALL* hosts, making sure to remove empty lines at the end.
+-  Copy above csv to the Ambari Server and place it in the `/var/lib/ambari-server/resources` directory, making sure to remove empty lines at the end.
 ```
 vi kerberos.csv
 ```
@@ -48,9 +52,15 @@ kinit admin
 ```
 
 ```
-awk -F"," '/SERVICE/ {print "ipa service-add --force "$3}' kerberos.csv | sort -u > ipa-add-spn.sh
-awk -F"," '/USER/ {print "ipa user-add "$5" --first="$5" --last=Hadoop --shell=/sbin/nologin"}' kerberos.csv | sort | uniq > ipa-add-upn.sh
+AMBARI_HOST=<ambari_host>
+# Get the kerberos.csv file from Ambari
+wget http://${AMBARI_HOST}:8080/resources/kerberos.csv -O /tmp/kerberos.csv
+# Create IPA service entries.
+awk -F"," '/SERVICE/ {print "ipa service-add --force "$3}' /tmp/kerberos.csv | sort -u > ipa-add-spn.sh
 sh ipa-add-spn.sh
+
+# Do NOT create users for services if they were create in IPA already.
+awk -F"," '/USER/ {print "ipa user-add "$5" --first="$5" --last=Hadoop --shell=/sbin/nologin"}' /tmp/kerberos.csv | sort | uniq > ipa-add-upn.sh
 sh ipa-add-upn.sh
 ```
 
@@ -59,50 +69,87 @@ sh ipa-add-upn.sh
 ```
 ## authenticate
 sudo echo '<kerberos_password>' | kinit --password-file=STDIN admin
+## or (IPA 4)
+sudo echo '<kerberos_password>' | kinit -X password-file=STDIN admin
 ```
 
 ```
-ipa_server=$(cat /etc/ipa/default.conf | awk '/^server =/ {print $3}')
+AMBARI_HOST=<ambari_host>
+wget http://${AMBARI_HOST}:8080/resources/kerberos.csv -O /tmp/kerberos.csv
+ipa_server=$(grep host /etc/ipa/default.conf |  awk -F= '{print $2}')
 sudo mkdir /etc/security/keytabs/
 sudo chown root:hadoop /etc/security/keytabs/
-grep USER kerberos.csv | awk -F"," '/'$(hostname -f)'/ {print "ipa-getkeytab -s '${ipa_server}' -p "$3" -k "$6";chown "$7":"$9,$6";chmod "$11,$6}' | sort -u > gen_keytabs_user.sh
+grep USER /tmp/kerberos.csv | awk -F"," '{print "ipa-getkeytab -s '${ipa_server}' -p "$3" -k "$6";chown "$7":"$9,$6";chmod "$11,$6}' | sort -u > gen_keytabs_user.sh
 sudo bash ./gen_keytabs_user.sh
 ```
 
 ```
 # tar up the contents of the headless keytabs (use Ambari's Resources for distribution)
-tar -cvfz /var/lib/ambari-server/resources/headless.keytabs.tgz -C /etc/security keytabs
+tar cvfz /var/lib/ambari-server/resources/headless.keytabs.tgz -C /etc/security keytabs
 ```
 
 - **Use pdsh to distribute and expand** headless keytabs.
 ```
-pdsh -g <cluster_host_group> 'wget http://<ambari-server>:8080/resources/headless.keytabs.tgz -O /tmp/headless.keytabs.tgz;tar -xvfz /tmp/headless.keytabs.tgz -C /etc/security'
+pdsh -g <cluster_host_group> 'wget http://<ambari-server>:8080/resources/headless.keytabs.tgz -O /tmp/headless.keytabs.tgz;cd /etc/security;tar xvfz /tmp/headless.keytabs.tgz'
 ```
 
-- **On the Each HDP node** authenticate and create the keytabs
+- **Build a distribution script** used to create host specific keytabs.
 
 ```
-## authenticate
-sudo echo '<kerberos_password>' | kinit --password-file=STDIN admin
+vi build_keytabs.sh
 ```
 
 ```
-ipa_server=$(cat /etc/ipa/default.conf | awk '/^server =/ {print $3}')
-sudo mkdir /etc/security/keytabs/
-sudo chown root:hadoop /etc/security/keytabs/
-grep SERVICE kerberos.csv | awk -F"," '/'$(hostname -f)'/ {print "ipa-getkeytab -s '${ipa_server}' -p "$3" -k "$6";chown "$7":"$9,$6";chmod "$11,$6}' | sort -u > gen_keytabs_service.sh
-sudo bash ./gen_keytabs_service.sh
+AMBARI_HOST=<ambari_host>
+wget http://${AMBARI_HOST}:8080/resources/kerberos.csv -O /tmp/kerberos.csv
+ipa_server=$(grep server /etc/ipa/default.conf |  awk -F= '{print $2}')
+if [ "$ipa_serverX" == "X" ]; then
+    ipa_server=$(grep host /etc/ipa/default.conf |  awk -F= '{print $2}')
+fi
+if [ ! -d /etc/security/keytabs ]; then
+    mkdir -p /etc/security/keytabs
+fi
+chown root:hadoop /etc/security/keytabs/
+grep SERVICE /tmp/kerberos.csv | awk -F"," '/'$(hostname -f)'/ {print "ipa-getkeytab -s '$(echo $ipa_server)' -p "$3" -k "$6";chown "$7":"$9,$6";chmod "$11,$6}' | sort -u > gen_keytabs_service.sh
+bash ./gen_keytabs_service.sh
 ```
 
-- Verify kinit works before proceeding (should not give errors)
+Copy file to the Ambari Servers resource directory for distribution.
 
 ```
-# Service Account Check
-sudo -u hdfs kinit -kt /etc/security/keytabs/nn.service.keytab nn/$(hostname -f)@HORTONWORKS.COM
+scp build_keytabs.sh root@<ambari_host>:/var/lib/ambari-server/resources
+```
 
-# Headless Check (check on multiple hosts)
-sudo -u ambari-qa kinit -kt /etc/security/keytabs/smokeuser.headless.keytab ambari-qa@HORTONWORKS.COM
-sudo -u hdfs kinit -kt /etc/security/keytabs/hdfs.headless.keytab hdfs@HORTONWORKS.COM
+- **On the Each HDP node via 'pdsh'** authenticate and create the keytabs
+
+```
+# Should be logging in as 'root'
+pdsh -g <host_group> -l root
+
+> ## authenticate
+> echo '<kerberos_password>' | kinit --password-file=STDIN admin
+> wget http://<ambari_host>:8080/resources/build_keytabs.sh -O /tmp/build_keytabs.sh
+> bash /tmp/build_keytabs.sh
+> ## Verify kinit works before proceeding (should not give errors)
+> # Service Account Check
+> sudo -u hdfs kinit -kt /etc/security/keytabs/nn.service.keytab nn/$(hostname -f)@HORTONWORKS.COM
+> # Headless Check (check on multiple hosts)
+> sudo -u ambari-qa kinit -kt /etc/security/keytabs/smokeuser.headless.keytab ambari-qa@HORTONWORKS.COM
+> sudo -u hdfs kinit -kt /etc/security/keytabs/hdfs.headless.keytab hdfs@HORTONWORKS.COM
+```
+
+# WARNING: IPA UI is Broken after above procedure
+
+When the process to build keytabs for services is run on the same host that IPA lives on, it will invalidate the keytab used by Apache HTTPD to authenticate.
+
+Replace /etc/httpd/conf/ipa.keytab with /etc/security/keytabs/spnego.service.keytab
+
+```
+cd /etc/httpd/conf
+mv ipa.keytab ipa.keytab.orig
+cp /etc/security/keytabs/spnego.service.keytab ipa.keytab
+chown apache:apache ipa.keytab
+service httpd restart
 ```
 
 ### Remove the headless.keytabs.tgz file from /var/lib/ambari-server/resources on the Ambari-Server.
